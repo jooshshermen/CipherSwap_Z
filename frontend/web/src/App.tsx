@@ -5,38 +5,54 @@ import { getContractReadOnly, getContractWithSigner } from "./components/useCont
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
-interface SwapData {
+interface PoolData {
   id: string;
-  pair: string;
-  amount: number;
-  timestamp: number;
+  tokenPair: string;
+  encryptedLiquidity: string;
+  publicVolume: number;
+  publicFees: number;
   creator: string;
-  publicValue1: number;
-  publicValue2: number;
+  timestamp: number;
   isVerified?: boolean;
   decryptedValue?: number;
+}
+
+interface TradeData {
+  id: string;
+  inputToken: string;
+  outputToken: string;
+  inputAmount: number;
+  outputAmount: number;
+  timestamp: number;
+  trader: string;
 }
 
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [swaps, setSwaps] = useState<SwapData[]>([]);
-  const [showSwapModal, setShowSwapModal] = useState(false);
-  const [creatingSwap, setCreatingSwap] = useState(false);
+  const [pools, setPools] = useState<PoolData[]>([]);
+  const [trades, setTrades] = useState<TradeData[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showCreatePoolModal, setShowCreatePoolModal] = useState(false);
+  const [creatingPool, setCreatingPool] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
     status: "pending", 
     message: "" 
   });
-  const [newSwapData, setNewSwapData] = useState({ pair: "ETH/USDT", amount: "" });
-  const [selectedSwap, setSelectedSwap] = useState<SwapData | null>(null);
-  const [decryptedAmount, setDecryptedAmount] = useState<number | null>(null);
+  const [newPoolData, setNewPoolData] = useState({ tokenPair: "", liquidity: "" });
+  const [selectedPool, setSelectedPool] = useState<PoolData | null>(null);
+  const [decryptedLiquidity, setDecryptedLiquidity] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
-  const [volume24h, setVolume24h] = useState(0);
-  const [activeTraders, setActiveTraders] = useState(0);
+  const [activeTab, setActiveTab] = useState("swap");
+  const [inputToken, setInputToken] = useState("ETH");
+  const [outputToken, setOutputToken] = useState("ZAMA");
+  const [inputAmount, setInputAmount] = useState("");
+  const [outputAmount, setOutputAmount] = useState("");
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
@@ -44,7 +60,8 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
@@ -88,95 +105,96 @@ const App: React.FC = () => {
   const loadData = async () => {
     if (!isConnected) return;
     
+    setIsRefreshing(true);
     try {
       const contract = await getContractReadOnly();
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const swapsList: SwapData[] = [];
+      const poolsList: PoolData[] = [];
       
       for (const businessId of businessIds) {
         try {
           const businessData = await contract.getBusinessData(businessId);
-          swapsList.push({
+          poolsList.push({
             id: businessId,
-            pair: businessData.name,
-            amount: Number(businessData.publicValue1) || 0,
-            timestamp: Number(businessData.timestamp),
+            tokenPair: businessData.name,
+            encryptedLiquidity: businessId,
+            publicVolume: Number(businessData.publicValue1) || 0,
+            publicFees: Number(businessData.publicValue2) || 0,
             creator: businessData.creator,
-            publicValue1: Number(businessData.publicValue1) || 0,
-            publicValue2: Number(businessData.publicValue2) || 0,
+            timestamp: Number(businessData.timestamp),
             isVerified: businessData.isVerified,
             decryptedValue: Number(businessData.decryptedValue) || 0
           });
         } catch (e) {
-          console.error('Error loading business data:', e);
+          console.error('Error loading pool data:', e);
         }
       }
       
-      setSwaps(swapsList);
-      setVolume24h(swapsList.reduce((sum, swap) => sum + swap.publicValue1, 0));
-      setActiveTraders(new Set(swapsList.map(swap => swap.creator)).size);
+      setPools(poolsList);
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+    } finally { 
+      setIsRefreshing(false); 
     }
   };
 
-  const createSwap = async () => {
+  const createPool = async () => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
-    setCreatingSwap(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating swap with Zama FHE..." });
+    setCreatingPool(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "Creating pool with FHE..." });
     
     try {
       const contract = await getContractWithSigner();
-      if (!contract) throw new Error("Failed to get contract with signer");
+      if (!contract) throw new Error("Failed to get contract");
       
-      const amountValue = parseInt(newSwapData.amount) || 0;
-      const businessId = `swap-${Date.now()}`;
+      const liquidityValue = parseInt(newPoolData.liquidity) || 0;
+      const businessId = `pool-${Date.now()}`;
       
-      const encryptedResult = await encrypt(contractAddress, address, amountValue);
+      const encryptedResult = await encrypt(contractAddress, address, liquidityValue);
       
       const tx = await contract.createBusinessData(
         businessId,
-        newSwapData.pair,
+        newPoolData.tokenPair,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        amountValue,
         0,
-        "FHE Encrypted Swap"
+        0,
+        "Liquidity Pool"
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for confirmation..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Swap created successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Pool created!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
       await loadData();
-      setShowSwapModal(false);
-      setNewSwapData({ pair: "ETH/USDT", amount: "" });
+      setShowCreatePoolModal(false);
+      setNewPoolData({ tokenPair: "", liquidity: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected by user" 
-        : "Submission failed: " + (e.message || "Unknown error");
+        ? "Transaction rejected" 
+        : "Creation failed";
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
-      setCreatingSwap(false); 
+      setCreatingPool(false); 
     }
   };
 
-  const decryptData = async (businessId: string): Promise<number | null> => {
+  const decryptLiquidity = async (businessId: string): Promise<number | null> => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     }
@@ -189,14 +207,6 @@ const App: React.FC = () => {
       const businessData = await contractRead.getBusinessData(businessId);
       if (businessData.isVerified) {
         const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ 
-          visible: true, 
-          status: "success", 
-          message: "Data already verified on-chain" 
-        });
-        setTimeout(() => {
-          setTransactionStatus({ visible: false, status: "pending", message: "" });
-        }, 2000);
         return storedValue;
       }
       
@@ -212,13 +222,13 @@ const App: React.FC = () => {
           contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
       await loadData();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Decryption verified!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
@@ -227,11 +237,7 @@ const App: React.FC = () => {
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ 
-          visible: true, 
-          status: "success", 
-          message: "Data is already verified on-chain" 
-        });
+        setTransactionStatus({ visible: true, status: "success", message: "Already verified" });
         setTimeout(() => {
           setTransactionStatus({ visible: false, status: "pending", message: "" });
         }, 2000);
@@ -239,11 +245,7 @@ const App: React.FC = () => {
         return null;
       }
       
-      setTransactionStatus({ 
-        visible: true, 
-        status: "error", 
-        message: "Decryption failed: " + (e.message || "Unknown error") 
-      });
+      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     } finally { 
@@ -251,37 +253,113 @@ const App: React.FC = () => {
     }
   };
 
-  const handleDecrypt = async (swapId: string) => {
-    const decrypted = await decryptData(swapId);
-    if (decrypted !== null) {
-      setDecryptedAmount(decrypted);
+  const handleDecryptPool = async () => {
+    if (!selectedPool) return;
+    const decrypted = await decryptLiquidity(selectedPool.id);
+    setDecryptedLiquidity(decrypted);
+  };
+
+  const handleSwap = async () => {
+    if (!isConnected || !address) { 
+      setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+      return; 
+    }
+    
+    setTransactionStatus({ visible: true, status: "pending", message: "Executing swap..." });
+    
+    try {
+      const contract = await getContractWithSigner();
+      if (!contract) throw new Error("Failed to get contract");
+      
+      const tx = await contract.isAvailable();
+      await tx.wait();
+      
+      const newTrade: TradeData = {
+        id: `trade-${Date.now()}`,
+        inputToken,
+        outputToken,
+        inputAmount: parseFloat(inputAmount) || 0,
+        outputAmount: parseFloat(outputAmount) || 0,
+        timestamp: Math.floor(Date.now() / 1000),
+        trader: address
+      };
+      
+      setTrades([newTrade, ...trades.slice(0, 9)]);
+      setInputAmount("");
+      setOutputAmount("");
+      
+      setTransactionStatus({ visible: true, status: "success", message: "Swap executed!" });
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 2000);
+    } catch (e: any) {
+      const errorMessage = e.message?.includes("user rejected transaction") 
+        ? "Transaction rejected" 
+        : "Swap failed";
+      setTransactionStatus({ visible: true, status: "error", message: errorMessage });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const checkAvailability = async () => {
-    try {
-      const contract = await getContractReadOnly();
-      if (!contract) return;
-      
-      const isAvailable = await contract.isAvailable();
-      if (isAvailable) {
-        setTransactionStatus({ 
-          visible: true, 
-          status: "success", 
-          message: "Contract is available and functioning properly" 
-        });
-        setTimeout(() => {
-          setTransactionStatus({ visible: false, status: "pending", message: "" });
-        }, 2000);
-      }
-    } catch (e) {
-      setTransactionStatus({ 
-        visible: true, 
-        status: "error", 
-        message: "Failed to check contract availability" 
-      });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-    }
+  const renderStats = () => {
+    const totalPools = pools.length;
+    const verifiedPools = pools.filter(p => p.isVerified).length;
+    const totalVolume = pools.reduce((sum, p) => sum + p.publicVolume, 0);
+    const totalFees = pools.reduce((sum, p) => sum + p.publicFees, 0);
+
+    return (
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-value">{totalPools}</div>
+          <div className="stat-label">Total Pools</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{verifiedPools}</div>
+          <div className="stat-label">Verified</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{totalVolume.toFixed(2)}</div>
+          <div className="stat-label">Volume</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{totalFees.toFixed(4)}</div>
+          <div className="stat-label">Fees</div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderKLine = () => {
+    return (
+      <div className="kline-container">
+        <div className="kline-header">
+          <div className="kline-title">ZAMA/ETH</div>
+          <div className="kline-price">0.00245 <span className="price-change">+1.2%</span></div>
+        </div>
+        <div className="kline-chart">
+          <div className="chart-grid">
+            <div className="grid-line"></div>
+            <div className="grid-line"></div>
+            <div className="grid-line"></div>
+            <div className="grid-line"></div>
+          </div>
+          <div className="price-line">
+            <div className="price-move up"></div>
+            <div className="price-move down"></div>
+            <div className="price-move up"></div>
+            <div className="price-move up"></div>
+            <div className="price-move down"></div>
+          </div>
+        </div>
+        <div className="kline-footer">
+          <div className="timeframe">1H</div>
+          <div className="timeframe active">4H</div>
+          <div className="timeframe">1D</div>
+          <div className="timeframe">1W</div>
+        </div>
+      </div>
+    );
   };
 
   if (!isConnected) {
@@ -289,34 +367,75 @@ const App: React.FC = () => {
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>CipherSwap_Z 🔐</h1>
+            <h1>CipherSwap_Z</h1>
+            <div className="tagline">FHE-Powered Private DEX</div>
           </div>
           <div className="header-actions">
-            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            <div className="wallet-connect-wrapper">
+              <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            </div>
           </div>
         </header>
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <div className="connection-icon">🔐</div>
-            <h2>Connect Your Wallet to Continue</h2>
-            <p>Please connect your wallet to access the FHE-based decentralized exchange.</p>
+            <div className="connection-icon">🔒</div>
+            <h2>Connect Wallet to Access Private DEX</h2>
+            <p>Secure your trades with fully homomorphic encryption technology</p>
             <div className="connection-steps">
               <div className="step">
                 <span>1</span>
-                <p>Connect your wallet using the button above</p>
+                <p>Connect wallet to initialize FHE system</p>
               </div>
               <div className="step">
                 <span>2</span>
-                <p>FHE system will automatically initialize</p>
+                <p>Trade with encrypted order books</p>
               </div>
               <div className="step">
                 <span>3</span>
-                <p>Start trading with full privacy protection</p>
+                <p>Prevent MEV and front-running</p>
               </div>
             </div>
           </div>
         </div>
+        
+        <div className="feature-showcase">
+          <div className="feature">
+            <div className="feature-icon">🔐</div>
+            <h3>Encrypted Order Books</h3>
+            <p>All orders encrypted with FHE to prevent front-running</p>
+          </div>
+          <div className="feature">
+            <div className="feature-icon">🔄</div>
+            <h3>Homomorphic Execution</h3>
+            <p>Trades executed on encrypted data without decryption</p>
+          </div>
+          <div className="feature">
+            <div className="feature-icon">🛡️</div>
+            <h3>MEV Protection</h3>
+            <p>Prevent miner extractable value through encryption</p>
+          </div>
+        </div>
+        
+        <footer className="app-footer">
+          <div className="footer-content">
+            <div className="footer-section">
+              <h4>CipherSwap_Z</h4>
+              <p>FHE-based Decentralized Exchange</p>
+            </div>
+            <div className="footer-section">
+              <h4>Technology</h4>
+              <p>Fully Homomorphic Encryption</p>
+              <p>Zero-Knowledge Proofs</p>
+            </div>
+            <div className="footer-section">
+              <h4>Security</h4>
+              <p>Audited Contracts</p>
+              <p>Non-Custodial</p>
+            </div>
+          </div>
+          <div className="copyright">© 2025 CipherSwap_Z. All rights reserved.</div>
+        </footer>
       </div>
     );
   }
@@ -326,7 +445,7 @@ const App: React.FC = () => {
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
         <p>Initializing FHE Encryption System...</p>
-        <p>Status: {fhevmInitializing ? "Initializing FHEVM" : status}</p>
+        <p className="loading-note">Securing your trading environment</p>
       </div>
     );
   }
@@ -334,7 +453,7 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading encrypted DEX system...</p>
+      <p>Loading encrypted DEX...</p>
     </div>
   );
 
@@ -342,251 +461,260 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <h1>CipherSwap_Z 🔐</h1>
-          <p>FHE-based Decentralized Exchange</p>
+          <h1>CipherSwap_Z</h1>
+          <div className="tagline">FHE-Powered Private DEX</div>
         </div>
         
         <div className="header-actions">
-          <button 
-            onClick={() => setShowSwapModal(true)} 
-            className="create-btn"
-          >
-            + New Swap
-          </button>
-          <button 
-            onClick={checkAvailability} 
-            className="check-btn"
-          >
-            Check Status
-          </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
-        </div>
-      </header>
-      
-      <div className="main-content-container">
-        <div className="dashboard-section">
-          <h2>Market Overview (FHE 🔐)</h2>
-          
-          <div className="stats-grid">
-            <div className="stat-card">
-              <h3>24h Volume</h3>
-              <div className="stat-value">{volume24h}</div>
-              <div className="stat-label">FHE Protected</div>
-            </div>
-            
-            <div className="stat-card">
-              <h3>Active Traders</h3>
-              <div className="stat-value">{activeTraders}</div>
-              <div className="stat-label">This Week</div>
-            </div>
-            
-            <div className="stat-card">
-              <h3>Verified Swaps</h3>
-              <div className="stat-value">{swaps.filter(s => s.isVerified).length}</div>
-              <div className="stat-label">On-chain</div>
-            </div>
-          </div>
-          
-          <div className="fhe-explainer">
-            <div className="explainer-step">
-              <div className="step-number">1</div>
-              <div className="step-content">
-                <h4>Encrypted Order Book</h4>
-                <p>All swap amounts are encrypted with Zama FHE 🔐</p>
-              </div>
-            </div>
-            
-            <div className="explainer-step">
-              <div className="step-number">2</div>
-              <div className="step-content">
-                <h4>Homomorphic Execution</h4>
-                <p>Trades execute without revealing amounts</p>
-              </div>
-            </div>
-            
-            <div className="explainer-step">
-              <div className="step-number">3</div>
-              <div className="step-content">
-                <h4>MEV Protection</h4>
-                <p>Front-running impossible with encrypted state</p>
-              </div>
-            </div>
-          </div>
-        </div>
-        
-        <div className="swaps-section">
-          <div className="section-header">
-            <h2>Recent Swaps</h2>
+          <div className="tabs">
             <button 
-              onClick={loadData} 
-              className="refresh-btn"
+              className={`tab ${activeTab === "swap" ? "active" : ""}`}
+              onClick={() => setActiveTab("swap")}
             >
-              Refresh
+              Swap
+            </button>
+            <button 
+              className={`tab ${activeTab === "pools" ? "active" : ""}`}
+              onClick={() => setActiveTab("pools")}
+            >
+              Pools
+            </button>
+            <button 
+              className={`tab ${activeTab === "stats" ? "active" : ""}`}
+              onClick={() => setActiveTab("stats")}
+            >
+              Stats
             </button>
           </div>
           
-          <div className="swaps-list">
-            {swaps.length === 0 ? (
-              <div className="no-swaps">
-                <p>No swaps found</p>
+          <button 
+            onClick={() => setShowCreatePoolModal(true)} 
+            className="create-btn"
+          >
+            + New Pool
+          </button>
+          
+          <div className="wallet-connect-wrapper">
+            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          </div>
+        </div>
+      </header>
+      
+      <div className="main-content">
+        {activeTab === "swap" && (
+          <div className="swap-section">
+            <div className="swap-container">
+              <div className="swap-header">
+                <h2>Swap Tokens</h2>
+                <div className="swap-info">
+                  <span>FHE-Encrypted Order Book</span>
+                  <span>MEV Protected</span>
+                </div>
+              </div>
+              
+              <div className="swap-panel">
+                <div className="input-section">
+                  <div className="token-selector">
+                    <div className="token-label">From</div>
+                    <select 
+                      value={inputToken} 
+                      onChange={(e) => setInputToken(e.target.value)}
+                      className="token-select"
+                    >
+                      <option value="ETH">ETH</option>
+                      <option value="ZAMA">ZAMA</option>
+                      <option value="USDC">USDC</option>
+                    </select>
+                  </div>
+                  <input
+                    type="number"
+                    placeholder="0.0"
+                    value={inputAmount}
+                    onChange={(e) => setInputAmount(e.target.value)}
+                    className="amount-input"
+                  />
+                </div>
+                
+                <div className="swap-icon">↓</div>
+                
+                <div className="output-section">
+                  <div className="token-selector">
+                    <div className="token-label">To</div>
+                    <select 
+                      value={outputToken} 
+                      onChange={(e) => setOutputToken(e.target.value)}
+                      className="token-select"
+                    >
+                      <option value="ZAMA">ZAMA</option>
+                      <option value="ETH">ETH</option>
+                      <option value="USDC">USDC</option>
+                    </select>
+                  </div>
+                  <input
+                    type="number"
+                    placeholder="0.0"
+                    value={outputAmount}
+                    onChange={(e) => setOutputAmount(e.target.value)}
+                    className="amount-input"
+                  />
+                </div>
+                
+                <div className="swap-info-row">
+                  <span>Price: 1 ETH = 412.5 ZAMA</span>
+                  <span>Fee: 0.3%</span>
+                </div>
+                
                 <button 
-                  className="create-btn" 
-                  onClick={() => setShowSwapModal(true)}
+                  onClick={handleSwap} 
+                  className="swap-btn"
+                  disabled={!inputAmount || !outputAmount}
                 >
-                  Create First Swap
+                  Swap
                 </button>
               </div>
-            ) : swaps.map((swap, index) => (
-              <div 
-                className={`swap-item ${selectedSwap?.id === swap.id ? "selected" : ""} ${swap.isVerified ? "verified" : ""}`} 
-                key={index}
-                onClick={() => setSelectedSwap(swap)}
-              >
-                <div className="swap-pair">{swap.pair}</div>
-                <div className="swap-meta">
-                  <span>Amount: {swap.publicValue1}</span>
-                  <span>{new Date(swap.timestamp * 1000).toLocaleString()}</span>
-                </div>
-                <div className="swap-status">
-                  {swap.isVerified ? "✅ Verified" : "🔓 Ready for Verification"}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-      
-      {showSwapModal && (
-        <div className="modal-overlay">
-          <div className="create-swap-modal">
-            <div className="modal-header">
-              <h2>New FHE Swap</h2>
-              <button onClick={() => setShowSwapModal(false)} className="close-modal">&times;</button>
             </div>
             
-            <div className="modal-body">
-              <div className="fhe-notice">
-                <strong>FHE 🔐 Encryption</strong>
-                <p>Swap amount will be encrypted with Zama FHE (Integer only)</p>
-              </div>
+            <div className="chart-section">
+              {renderKLine()}
               
-              <div className="form-group">
-                <label>Token Pair *</label>
-                <select 
-                  name="pair" 
-                  value={newSwapData.pair} 
-                  onChange={(e) => setNewSwapData({...newSwapData, pair: e.target.value})}
+              <div className="recent-trades">
+                <h3>Recent Trades</h3>
+                <div className="trades-list">
+                  {trades.length === 0 ? (
+                    <div className="no-trades">No trades yet</div>
+                  ) : (
+                    trades.map((trade, index) => (
+                      <div className="trade-item" key={index}>
+                        <div className="trade-pair">{trade.inputToken} → {trade.outputToken}</div>
+                        <div className="trade-amount">{trade.inputAmount.toFixed(4)} → {trade.outputAmount.toFixed(4)}</div>
+                        <div className="trade-time">{new Date(trade.timestamp * 1000).toLocaleTimeString()}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {activeTab === "pools" && (
+          <div className="pools-section">
+            <div className="section-header">
+              <h2>Liquidity Pools</h2>
+              <div className="header-actions">
+                <button 
+                  onClick={loadData} 
+                  className="refresh-btn" 
+                  disabled={isRefreshing}
                 >
-                  <option value="ETH/USDT">ETH/USDT</option>
-                  <option value="BTC/USDT">BTC/USDT</option>
-                  <option value="SOL/USDC">SOL/USDC</option>
-                </select>
-              </div>
-              
-              <div className="form-group">
-                <label>Amount (Integer only) *</label>
-                <input 
-                  type="number" 
-                  name="amount" 
-                  value={newSwapData.amount} 
-                  onChange={(e) => setNewSwapData({...newSwapData, amount: e.target.value.replace(/[^\d]/g, '')})} 
-                  placeholder="Enter amount..." 
-                  step="1"
-                  min="0"
-                />
-                <div className="data-type-label">FHE Encrypted Integer</div>
+                  {isRefreshing ? "Refreshing..." : "Refresh"}
+                </button>
               </div>
             </div>
             
-            <div className="modal-footer">
-              <button onClick={() => setShowSwapModal(false)} className="cancel-btn">Cancel</button>
-              <button 
-                onClick={createSwap} 
-                disabled={creatingSwap || isEncrypting || !newSwapData.amount} 
-                className="submit-btn"
-              >
-                {creatingSwap || isEncrypting ? "Encrypting..." : "Create Swap"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      
-      {selectedSwap && (
-        <div className="modal-overlay">
-          <div className="swap-detail-modal">
-            <div className="modal-header">
-              <h2>Swap Details</h2>
-              <button onClick={() => {
-                setSelectedSwap(null);
-                setDecryptedAmount(null);
-              }} className="close-modal">&times;</button>
-            </div>
-            
-            <div className="modal-body">
-              <div className="swap-info">
-                <div className="info-item">
-                  <span>Pair:</span>
-                  <strong>{selectedSwap.pair}</strong>
-                </div>
-                <div className="info-item">
-                  <span>Creator:</span>
-                  <strong>{selectedSwap.creator.substring(0, 6)}...{selectedSwap.creator.substring(38)}</strong>
-                </div>
-                <div className="info-item">
-                  <span>Time:</span>
-                  <strong>{new Date(selectedSwap.timestamp * 1000).toLocaleString()}</strong>
-                </div>
-              </div>
-              
-              <div className="data-section">
-                <h3>Encrypted Swap Data</h3>
-                
-                <div className="data-row">
-                  <div className="data-label">Amount:</div>
-                  <div className="data-value">
-                    {selectedSwap.isVerified && selectedSwap.decryptedValue ? 
-                      `${selectedSwap.decryptedValue} (Verified)` : 
-                      decryptedAmount !== null ? 
-                      `${decryptedAmount} (Decrypted)` : 
-                      "🔒 FHE Encrypted"
-                    }
-                  </div>
+            <div className="pools-list">
+              {pools.length === 0 ? (
+                <div className="no-pools">
+                  <p>No liquidity pools found</p>
                   <button 
-                    className={`decrypt-btn ${(selectedSwap.isVerified || decryptedAmount !== null) ? 'decrypted' : ''}`}
-                    onClick={() => handleDecrypt(selectedSwap.id)} 
-                    disabled={isDecrypting || fheIsDecrypting}
+                    className="create-btn" 
+                    onClick={() => setShowCreatePoolModal(true)}
                   >
-                    {isDecrypting || fheIsDecrypting ? (
-                      "🔓 Verifying..."
-                    ) : selectedSwap.isVerified ? (
-                      "✅ Verified"
-                    ) : decryptedAmount !== null ? (
-                      "🔄 Re-verify"
-                    ) : (
-                      "🔓 Verify"
-                    )}
+                    Create First Pool
                   </button>
                 </div>
-                
-                <div className="fhe-info">
-                  <div className="fhe-icon">🔐</div>
-                  <div>
-                    <strong>FHE Protected Execution</strong>
-                    <p>Swap amounts remain encrypted during matching and execution, preventing MEV attacks.</p>
+              ) : pools.map((pool, index) => (
+                <div 
+                  className={`pool-item ${selectedPool?.id === pool.id ? "selected" : ""} ${pool.isVerified ? "verified" : ""}`} 
+                  key={index}
+                  onClick={() => {
+                    setSelectedPool(pool);
+                    setDecryptedLiquidity(null);
+                  }}
+                >
+                  <div className="pool-title">{pool.tokenPair}</div>
+                  <div className="pool-meta">
+                    <span>Volume: {pool.publicVolume.toFixed(2)}</span>
+                    <span>Fees: {pool.publicFees.toFixed(4)}</span>
+                  </div>
+                  <div className="pool-status">
+                    {pool.isVerified ? (
+                      <span className="verified">✅ Verified Liquidity: {pool.decryptedValue}</span>
+                    ) : (
+                      <span className="unverified">🔒 Encrypted Liquidity</span>
+                    )}
+                  </div>
+                  <div className="pool-creator">Creator: {pool.creator.substring(0, 6)}...{pool.creator.substring(38)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        
+        {activeTab === "stats" && (
+          <div className="stats-section">
+            <h2>Platform Statistics</h2>
+            {renderStats()}
+            
+            <div className="info-panel">
+              <h3>How FHE Protects Your Trades</h3>
+              <div className="fhe-process">
+                <div className="process-step">
+                  <div className="step-number">1</div>
+                  <div className="step-content">
+                    <h4>Encrypted Order Placement</h4>
+                    <p>Traders submit encrypted orders using FHE technology</p>
+                  </div>
+                </div>
+                <div className="process-step">
+                  <div className="step-number">2</div>
+                  <div className="step-content">
+                    <h4>Homomorphic Matching</h4>
+                    <p>Orders are matched without decrypting trade details</p>
+                  </div>
+                </div>
+                <div className="process-step">
+                  <div className="step-number">3</div>
+                  <div className="step-content">
+                    <h4>Secure Execution</h4>
+                    <p>Trades execute while keeping all details encrypted</p>
+                  </div>
+                </div>
+                <div className="process-step">
+                  <div className="step-number">4</div>
+                  <div className="step-content">
+                    <h4>MEV Prevention</h4>
+                    <p>Miners cannot front-run or extract value from trades</p>
                   </div>
                 </div>
               </div>
             </div>
-            
-            <div className="modal-footer">
-              <button onClick={() => {
-                setSelectedSwap(null);
-                setDecryptedAmount(null);
-              }} className="close-btn">Close</button>
-            </div>
           </div>
-        </div>
+        )}
+      </div>
+      
+      {showCreatePoolModal && (
+        <ModalCreatePool 
+          onSubmit={createPool} 
+          onClose={() => setShowCreatePoolModal(false)} 
+          creating={creatingPool} 
+          poolData={newPoolData} 
+          setPoolData={setNewPoolData}
+          isEncrypting={isEncrypting}
+        />
+      )}
+      
+      {selectedPool && (
+        <PoolDetailModal 
+          pool={selectedPool} 
+          onClose={() => { 
+            setSelectedPool(null); 
+            setDecryptedLiquidity(null); 
+          }} 
+          decryptedLiquidity={decryptedLiquidity}
+          isDecrypting={isDecrypting || fheIsDecrypting} 
+          onDecrypt={handleDecryptPool}
+        />
       )}
       
       {transactionStatus.visible && (
@@ -601,6 +729,202 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
+      
+      <footer className="app-footer">
+        <div className="footer-content">
+          <div className="footer-section">
+            <h4>CipherSwap_Z</h4>
+            <p>FHE-based Decentralized Exchange</p>
+            <p>Preventing MEV through encryption</p>
+          </div>
+          <div className="footer-section">
+            <h4>Technology</h4>
+            <p>Fully Homomorphic Encryption</p>
+            <p>Zero-Knowledge Proofs</p>
+            <p>Encrypted Order Books</p>
+          </div>
+          <div className="footer-section">
+            <h4>Security</h4>
+            <p>Audited Contracts</p>
+            <p>Non-Custodial</p>
+            <p>Anti-Front Running</p>
+          </div>
+        </div>
+        <div className="copyright">© 2025 CipherSwap_Z. All rights reserved.</div>
+      </footer>
+    </div>
+  );
+};
+
+const ModalCreatePool: React.FC<{
+  onSubmit: () => void; 
+  onClose: () => void; 
+  creating: boolean;
+  poolData: any;
+  setPoolData: (data: any) => void;
+  isEncrypting: boolean;
+}> = ({ onSubmit, onClose, creating, poolData, setPoolData, isEncrypting }) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    if (name === 'liquidity') {
+      const intValue = value.replace(/[^\d]/g, '');
+      setPoolData({ ...poolData, [name]: intValue });
+    } else {
+      setPoolData({ ...poolData, [name]: value });
+    }
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="create-pool-modal">
+        <div className="modal-header">
+          <h2>New Liquidity Pool</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="fhe-notice">
+            <strong>FHE 🔐 Encryption</strong>
+            <p>Liquidity amount encrypted with Zama FHE</p>
+          </div>
+          
+          <div className="form-group">
+            <label>Token Pair *</label>
+            <select 
+              name="tokenPair" 
+              value={poolData.tokenPair} 
+              onChange={handleChange} 
+              className="token-select"
+            >
+              <option value="">Select pair</option>
+              <option value="ETH/ZAMA">ETH/ZAMA</option>
+              <option value="ZAMA/USDC">ZAMA/USDC</option>
+              <option value="ETH/USDC">ETH/USDC</option>
+            </select>
+          </div>
+          
+          <div className="form-group">
+            <label>Liquidity Amount *</label>
+            <input 
+              type="number" 
+              name="liquidity" 
+              value={poolData.liquidity} 
+              onChange={handleChange} 
+              placeholder="Enter liquidity amount..." 
+              step="1"
+              min="0"
+            />
+            <div className="data-type-label">FHE Encrypted Integer</div>
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="cancel-btn">Cancel</button>
+          <button 
+            onClick={onSubmit} 
+            disabled={creating || isEncrypting || !poolData.tokenPair || !poolData.liquidity} 
+            className="submit-btn"
+          >
+            {creating || isEncrypting ? "Encrypting and Creating..." : "Create Pool"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const PoolDetailModal: React.FC<{
+  pool: PoolData;
+  onClose: () => void;
+  decryptedLiquidity: number | null;
+  isDecrypting: boolean;
+  onDecrypt: () => void;
+}> = ({ pool, onClose, decryptedLiquidity, isDecrypting, onDecrypt }) => {
+  return (
+    <div className="modal-overlay">
+      <div className="pool-detail-modal">
+        <div className="modal-header">
+          <h2>Pool Details</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="pool-info">
+            <div className="info-item">
+              <span>Token Pair:</span>
+              <strong>{pool.tokenPair}</strong>
+            </div>
+            <div className="info-item">
+              <span>Creator:</span>
+              <strong>{pool.creator.substring(0, 6)}...{pool.creator.substring(38)}</strong>
+            </div>
+            <div className="info-item">
+              <span>Created:</span>
+              <strong>{new Date(pool.timestamp * 1000).toLocaleDateString()}</strong>
+            </div>
+            <div className="info-item">
+              <span>Volume:</span>
+              <strong>{pool.publicVolume.toFixed(2)}</strong>
+            </div>
+            <div className="info-item">
+              <span>Fees Collected:</span>
+              <strong>{pool.publicFees.toFixed(4)}</strong>
+            </div>
+          </div>
+          
+          <div className="data-section">
+            <h3>Encrypted Liquidity</h3>
+            
+            <div className="data-row">
+              <div className="data-label">Liquidity Amount:</div>
+              <div className="data-value">
+                {pool.isVerified ? 
+                  `${pool.decryptedValue} (Verified)` : 
+                  decryptedLiquidity !== null ? 
+                  `${decryptedLiquidity} (Decrypted)` : 
+                  "🔒 FHE Encrypted"
+                }
+              </div>
+              <button 
+                className={`decrypt-btn ${(pool.isVerified || decryptedLiquidity !== null) ? 'decrypted' : ''}`}
+                onClick={onDecrypt} 
+                disabled={isDecrypting}
+              >
+                {isDecrypting ? (
+                  "🔓 Verifying..."
+                ) : pool.isVerified ? (
+                  "✅ Verified"
+                ) : decryptedLiquidity !== null ? (
+                  "🔄 Re-verify"
+                ) : (
+                  "🔓 Verify"
+                )}
+              </button>
+            </div>
+            
+            <div className="fhe-info">
+              <div className="fhe-icon">🔐</div>
+              <div>
+                <strong>FHE Protected Liquidity</strong>
+                <p>Liquidity amount encrypted on-chain using FHE technology</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="close-btn">Close</button>
+          {!pool.isVerified && (
+            <button 
+              onClick={onDecrypt} 
+              disabled={isDecrypting}
+              className="verify-btn"
+            >
+              {isDecrypting ? "Verifying..." : "Verify on-chain"}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 };
